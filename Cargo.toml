@@ -1,0 +1,25 @@
+[package]
+name = "portal-screen-mirror"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["fumoctl"]
+description = "Compositor-agnostic Wayland screen, window, and region mirroring via XDG ScreenCast, wlr-screencopy, and layer-shell."
+repository = "https://github.com/fumoctl/portal-screen-mirror"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland"] }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-egl = "0.32"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+zbus = { version = "5.5", default-features = false, features = ["async-io", "blocking-api"] }
+
+[build-dependencies]
+cc = "1.2"
+pkg-config = "0.3"
