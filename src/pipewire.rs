@@ -221,7 +221,7 @@ impl PwCapture {
     }
 
     pub fn check_error(&self) -> Option<String> {
-        let mut buf = [0i8; 256];
+        let mut buf: [libc::c_char; 256] = [0; 256];
         let has = unsafe { psm_pw_has_error(self.inner.as_ptr(), buf.as_mut_ptr(), buf.len()) };
         if has {
             let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }

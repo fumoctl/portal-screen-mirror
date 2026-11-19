@@ -319,7 +319,7 @@ fn compile_shader(kind: GLenum, src: &str) -> Result<GLuint, String> {
         let mut ok = 0;
         glGetShaderiv(sh, GL_COMPILE_STATUS, &mut ok);
         if ok == 0 {
-            let mut buf = [0i8; 512];
+            let mut buf: [c_char; 512] = [0; 512];
             let mut len = 0;
             glGetShaderInfoLog(sh, 511, &mut len, buf.as_mut_ptr());
             glDeleteShader(sh);
