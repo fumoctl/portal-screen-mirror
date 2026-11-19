@@ -620,7 +620,13 @@ fn start_mirror(
     common: MirrorCommonArgs,
     region_opts: Option<RegionExtraArgs>,
 ) -> Result<(), String> {
-    let ipc = IpcServer::bind()?;
+    if ipc::send_request(&IpcRequest::Status).is_ok() {
+        return Err(
+            "Another portal-screen-mirror instance is already running (use `stop` or `toggle`)"
+                .to_string(),
+        );
+    }
+
     let outputs = query_outputs()?;
     let dest = select_destination(&outputs, common.to.as_deref())?.clone();
     let (max_fps_spec, effective_fps_cap) = parse_fps_spec(&common.max_fps, dest.refresh_hz)?;
@@ -628,10 +634,6 @@ fn start_mirror(
 
     let wake_fd = create_eventfd()?;
     let _wake_guard = WakeFdGuard(wake_fd);
-
-    let (mut win, wl_egl, dpy_ptr) = PresentationWindow::create(&dest.name)?;
-    let (init_w, init_h) = win.physical_size();
-    let mut egl = EglRenderer::new(dpy_ptr, wl_egl, init_w, init_h)?;
 
     let mut live = LiveSettings {
         mode: if region_opts.is_some() {
@@ -668,6 +670,10 @@ fn start_mirror(
 
         if !reg.portal_only {
             if let Some(mut sc) = WlrScreencopyRegion::try_open(src_out, rect, show_cursor)? {
+                let ipc = IpcServer::bind()?;
+                let (mut win, wl_egl, dpy_ptr) = PresentationWindow::create(&dest.name)?;
+                let (init_w, init_h) = win.physical_size();
+                let mut egl = EglRenderer::new(dpy_ptr, wl_egl, init_w, init_h)?;
                 live.backend = "wlr-screencopy".to_string();
                 return run_screencopy_loop(&ipc, &mut win, &mut egl, &mut sc, &mut live, wake_fd);
             }
@@ -699,6 +705,10 @@ fn start_mirror(
             (0.0, 0.0, 1.0, 1.0)
         };
 
+        let ipc = IpcServer::bind()?;
+        let (mut win, wl_egl, dpy_ptr) = PresentationWindow::create(&dest.name)?;
+        let (init_w, init_h) = win.physical_size();
+        let mut egl = EglRenderer::new(dpy_ptr, wl_egl, init_w, init_h)?;
         run_pipewire_loop(
             &ipc, &mut win, &mut egl, sel, crop_uv, common.shm, &mut live, wake_fd,
         )
@@ -708,6 +718,10 @@ fn start_mirror(
         else {
             return Ok(());
         };
+        let ipc = IpcServer::bind()?;
+        let (mut win, wl_egl, dpy_ptr) = PresentationWindow::create(&dest.name)?;
+        let (init_w, init_h) = win.physical_size();
+        let mut egl = EglRenderer::new(dpy_ptr, wl_egl, init_w, init_h)?;
         run_pipewire_loop(
             &ipc,
             &mut win,

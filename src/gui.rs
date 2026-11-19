@@ -4,8 +4,10 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Margin, RichText, Sense, Stroke,
     StrokeKind, Vec2,
 };
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,7 +49,9 @@ pub fn run_gui(init: GuiInitArgs) -> Result<(), String> {
             .with_title("Portal Screen Mirror")
             .with_app_id("portal-screen-mirror")
             .with_inner_size([410.0, 565.0])
-            .with_min_inner_size([365.0, 490.0])
+            .with_min_inner_size([410.0, 565.0])
+            .with_max_inner_size([410.0, 565.0])
+            .with_resizable(false)
             .with_icon(build_window_icon()),
         ..Default::default()
     };
@@ -142,6 +146,10 @@ fn configure_visuals(ctx: &egui::Context) {
     });
 }
 
+fn daemon_log_path() -> PathBuf {
+    ipc::socket_path().with_extension("log")
+}
+
 struct MirrorGuiApp {
     outputs: Vec<OutputInfo>,
     selected_output: String,
@@ -153,7 +161,9 @@ struct MirrorGuiApp {
 
     status: Option<MirrorStatus>,
     synced_pid: Option<u32>,
-    pending_child: Option<Child>,
+    spawned_child: Option<Child>,
+    waiting_selection: bool,
+    ignore_clicks_until: Instant,
     last_error: Option<String>,
     last_poll: Instant,
 }
@@ -161,6 +171,7 @@ struct MirrorGuiApp {
 impl MirrorGuiApp {
     fn new(cc: &eframe::CreationContext<'_>, init: GuiInitArgs) -> Self {
         configure_visuals(&cc.egui_ctx);
+        let now = Instant::now();
         let mut app = Self {
             outputs: Vec::new(),
             selected_output: init.to.unwrap_or_default(),
@@ -171,9 +182,11 @@ impl MirrorGuiApp {
             force_shm: init.shm,
             status: None,
             synced_pid: None,
-            pending_child: None,
+            spawned_child: None,
+            waiting_selection: false,
+            ignore_clicks_until: now,
             last_error: None,
-            last_poll: Instant::now() - Duration::from_secs(2),
+            last_poll: now - Duration::from_secs(2),
         };
         app.refresh_outputs();
         app.poll_daemon();
@@ -207,16 +220,14 @@ impl MirrorGuiApp {
     fn poll_daemon(&mut self) {
         self.last_poll = Instant::now();
 
-        if let Some(ref mut child) = self.pending_child {
+        if let Some(ref mut child) = self.spawned_child {
             match child.try_wait() {
                 Ok(Some(exit)) => {
-                    let mut err_txt = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        let _ = stderr.read_to_string(&mut err_txt);
-                    }
-                    self.pending_child = None;
+                    self.spawned_child = None;
+                    self.waiting_selection = false;
                     if !exit.success() {
-                        let msg = err_txt
+                        let log_txt = fs::read_to_string(daemon_log_path()).unwrap_or_default();
+                        let msg = log_txt
                             .lines()
                             .rev()
                             .find(|l| !l.trim().is_empty())
@@ -228,12 +239,13 @@ impl MirrorGuiApp {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    self.pending_child = None;
+                    self.spawned_child = None;
+                    self.waiting_selection = false;
                 }
             }
         }
 
-        match ipc::send_request(&IpcRequest::Status) {
+        match ipc::send_request_timeout(&IpcRequest::Status, Duration::from_millis(200)) {
             Ok(resp) if resp.ok => {
                 if let Some(st) = resp.status {
                     if self.synced_pid != Some(st.pid) {
@@ -243,8 +255,9 @@ impl MirrorGuiApp {
                         self.filter = st.filter;
                         self.max_fps = normalize_fps_preset(&st.max_fps_spec);
                     }
-                    if st.backend != "starting" {
-                        self.pending_child = None;
+                    if self.waiting_selection {
+                        self.waiting_selection = false;
+                        self.ignore_clicks_until = Instant::now() + Duration::from_millis(350);
                     }
                     self.status = Some(st);
                 }
@@ -258,11 +271,14 @@ impl MirrorGuiApp {
 
     fn push_live_settings(&mut self) {
         if self.status.is_some() {
-            match ipc::send_request(&IpcRequest::Set {
-                fit: Some(self.fit),
-                filter: Some(self.filter),
-                max_fps: Some(self.max_fps.clone()),
-            }) {
+            match ipc::send_request_timeout(
+                &IpcRequest::Set {
+                    fit: Some(self.fit),
+                    filter: Some(self.filter),
+                    max_fps: Some(self.max_fps.clone()),
+                },
+                Duration::from_millis(300),
+            ) {
                 Ok(resp) if resp.ok => {
                     if let Some(st) = resp.status {
                         self.status = Some(st);
@@ -275,8 +291,9 @@ impl MirrorGuiApp {
     }
 
     fn stop_active(&mut self) {
-        let _ = ipc::send_request(&IpcRequest::Stop);
-        if let Some(mut child) = self.pending_child.take() {
+        let _ = ipc::send_request_timeout(&IpcRequest::Stop, Duration::from_millis(300));
+        self.waiting_selection = false;
+        if let Some(mut child) = self.spawned_child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -317,6 +334,15 @@ impl MirrorGuiApp {
             FilterMode::Nearest => "nearest",
         };
 
+        let stderr_cfg = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(daemon_log_path())
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
+
         let mut cmd = Command::new(exe);
         cmd.arg(subcmd)
             .arg("--to")
@@ -329,7 +355,7 @@ impl MirrorGuiApp {
             .arg(&self.max_fps)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(stderr_cfg);
 
         if !self.show_cursor {
             cmd.arg("--no-cursor");
@@ -348,7 +374,9 @@ impl MirrorGuiApp {
 
         match cmd.spawn() {
             Ok(child) => {
-                self.pending_child = Some(child);
+                self.spawned_child = Some(child);
+                self.waiting_selection = true;
+                self.ignore_clicks_until = Instant::now() + Duration::from_millis(250);
             }
             Err(e) => {
                 self.last_error = Some(format!("Failed spawning mirror daemon: {e}"));
@@ -464,6 +492,7 @@ fn draw_button_icon(painter: &egui::Painter, center: egui::Pos2, icon: ButtonIco
 
 fn solid_action_button(
     ui: &mut egui::Ui,
+    id_salt: &str,
     icon: ButtonIcon,
     label: &str,
     fill: Color32,
@@ -471,7 +500,8 @@ fn solid_action_button(
     height: f32,
 ) -> egui::Response {
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let resp = ui.interact(rect, ui.make_persistent_id(id_salt), Sense::click());
     if ui.is_rect_visible(rect) {
         let bg = if resp.is_pointer_button_down_on() {
             fill.gamma_multiply(0.82)
@@ -567,10 +597,10 @@ impl eframe::App for MirrorGuiApp {
                 ui.add_space(6.0);
 
                 /* Status Banner + Stop Button */
-                let is_waiting = self.pending_child.is_some()
-                    && self.status.as_ref().is_none_or(|s| s.backend == "starting");
+                let clicks_allowed = Instant::now() >= self.ignore_clicks_until;
+                let is_waiting = self.waiting_selection && self.status.is_none();
 
-                if let Some(st) = self.status.clone().filter(|_| !is_waiting) {
+                if let Some(st) = self.status.clone() {
                     egui::Frame::NONE
                         .fill(CARD_ACTIVE_BG)
                         .stroke(Stroke::new(1.0, ACCENT_BLUE.gamma_multiply(0.55)))
@@ -612,6 +642,7 @@ impl eframe::App for MirrorGuiApp {
                     ui.add_space(4.0);
                     if solid_action_button(
                         ui,
+                        "btn_stop_mirror",
                         ButtonIcon::Stop,
                         "Stop Mirroring",
                         ACCENT_RED,
@@ -619,6 +650,7 @@ impl eframe::App for MirrorGuiApp {
                         40.0,
                     )
                     .clicked()
+                        && clicks_allowed
                     {
                         self.stop_active();
                     }
@@ -648,6 +680,7 @@ impl eframe::App for MirrorGuiApp {
                     ui.add_space(4.0);
                     if solid_action_button(
                         ui,
+                        "btn_cancel_selection",
                         ButtonIcon::Cancel,
                         "Cancel",
                         ACCENT_RED,
@@ -655,6 +688,7 @@ impl eframe::App for MirrorGuiApp {
                         38.0,
                     )
                     .clicked()
+                        && clicks_allowed
                     {
                         self.stop_active();
                     }
@@ -834,6 +868,7 @@ impl eframe::App for MirrorGuiApp {
 
                 if solid_action_button(
                     ui,
+                    "btn_launch_portal",
                     ButtonIcon::Portal,
                     "Portal Picker (Screen or Window)",
                     ACCENT_BLUE,
@@ -841,12 +876,14 @@ impl eframe::App for MirrorGuiApp {
                     42.0,
                 )
                 .clicked()
+                    && clicks_allowed
                 {
                     self.launch_mode("portal");
                 }
 
                 if solid_action_button(
                     ui,
+                    "btn_launch_region",
                     ButtonIcon::Region,
                     "Rectangular Region",
                     ACCENT_LAVENDER,
@@ -854,6 +891,7 @@ impl eframe::App for MirrorGuiApp {
                     42.0,
                 )
                 .clicked()
+                    && clicks_allowed
                 {
                     self.launch_mode("region");
                 }

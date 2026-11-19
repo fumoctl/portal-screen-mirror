@@ -67,11 +67,15 @@ pub fn socket_path() -> PathBuf {
 }
 
 pub fn send_request(req: &IpcRequest) -> Result<IpcResponse, String> {
+    send_request_timeout(req, Duration::from_millis(1500))
+}
+
+pub fn send_request_timeout(req: &IpcRequest, timeout: Duration) -> Result<IpcResponse, String> {
     let path = socket_path();
     let mut stream = UnixStream::connect(&path)
         .map_err(|_| "No active portal-screen-mirror session running".to_string())?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
     let mut payload = serde_json::to_string(req).map_err(|e| e.to_string())?;
     payload.push('\n');

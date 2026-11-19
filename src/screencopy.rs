@@ -142,6 +142,8 @@ struct ScState {
 
     slot: Option<ScreencopySlot>,
     active_frame: Option<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1>,
+    buffer_selected: bool,
+    copied_this_frame: bool,
     first_frame: bool,
     flags_y_invert: bool,
     frame_ready: bool,
@@ -222,14 +224,14 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for ScState {
                 height,
                 stride,
             } => {
+                if state.buffer_selected || state.copied_this_frame {
+                    return;
+                }
                 let raw_fmt: u32 = format.into();
                 let Some((wl_fmt, kind)) = map_wl_shm_format(raw_fmt) else {
-                    state.fatal_err =
-                        Some(format!("Unsupported wlr-screencopy format 0x{raw_fmt:x}"));
                     return;
                 };
                 if width == 0 || height == 0 || stride < width * 4 {
-                    state.fatal_err = Some("Invalid wlr-screencopy buffer geometry".to_string());
                     return;
                 }
                 let reuse = state.slot.as_ref().is_some_and(|s| {
@@ -248,6 +250,27 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for ScState {
                         Some("Failed allocating wlr-screencopy SHM buffer".to_string());
                     return;
                 };
+                state.buffer_selected = true;
+                if state.mgr_ver < 3 {
+                    state.copied_this_frame = true;
+                    if !state.first_frame && state.mgr_ver >= 2 {
+                        frame.copy_with_damage(&slot.buffer);
+                    } else {
+                        frame.copy(&slot.buffer);
+                    }
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                if state.copied_this_frame {
+                    return;
+                }
+                let Some(slot) = state.slot.as_ref().filter(|_| state.buffer_selected) else {
+                    state.fatal_err = Some(
+                        "Compositor offered no supported wlr-screencopy SHM format".to_string(),
+                    );
+                    return;
+                };
+                state.copied_this_frame = true;
                 if !state.first_frame && state.mgr_ver >= 2 {
                     frame.copy_with_damage(&slot.buffer);
                 } else {
@@ -365,6 +388,8 @@ impl WlrScreencopyRegion {
             output_gone: false,
             slot: None,
             active_frame: None,
+            buffer_selected: false,
+            copied_this_frame: false,
             first_frame: true,
             flags_y_invert: false,
             frame_ready: false,
@@ -423,6 +448,8 @@ impl WlrScreencopyRegion {
         let Some(ref mgr) = self.state.mgr else {
             return;
         };
+        self.state.buffer_selected = false;
+        self.state.copied_this_frame = false;
         self.state.flags_y_invert = false;
         self.state.frame_ready = false;
         self.state.frame_failed = false;
