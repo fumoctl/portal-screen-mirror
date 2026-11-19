@@ -1,7 +1,7 @@
 # Maintainer: fumoctl
 pkgname=portal-screen-mirror-bin
 _pkgname=portal-screen-mirror
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Compositor-agnostic Wayland screen, window, and region mirror via XDG ScreenCast, PipeWire DMA-BUF/SHM, and EGL"
 arch=('x86_64' 'aarch64')
