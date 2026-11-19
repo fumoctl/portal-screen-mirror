@@ -96,7 +96,16 @@ Enable via the **NixOS module** or **Home Manager module**:
 
 Or use the **overlay** (`inputs.portal-screen-mirror.overlays.default`) to expose `pkgs.portal-screen-mirror`.
 
-### Building on Arch / Fedora / Debian / Ubuntu
+### Prebuilt Releases (AppImage / `.deb` / `.rpm` / Tarball)
+
+Every tagged GitHub Release (`v*`) builds `x86_64` and `aarch64` packages against `glibc 2.35` (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, Bazzite, SteamOS):
+
+- **AppImage**: Download `portal-screen-mirror-x86_64.AppImage` from [Releases](https://github.com/fumoctl/portal-screen-mirror/releases), mark executable (`chmod +x`), or import with **Gear Lever** (`~/AppImages`) / **AppImageLauncher** (`~/Applications`).
+- **Debian / Ubuntu**: `sudo apt install ./portal-screen-mirror_*_amd64.deb`
+- **Fedora / openSUSE**: `sudo dnf install ./portal-screen-mirror-*.x86_64.rpm`
+- **Arch Linux (AUR template)**: `cd packaging/aur && makepkg -si`
+
+### Building from Source on Arch / Fedora / Debian / Ubuntu
 
 Install `rustc`, `cargo`, `pkg-config`, and development headers for `libpipewire-0.3`, `wayland-client`, `wayland-egl`, and `libglvnd` (`egl`, `glesv2`):
 

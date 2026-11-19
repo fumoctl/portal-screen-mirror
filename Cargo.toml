@@ -23,3 +23,26 @@ zbus = { version = "5.5", default-features = false, features = ["async-io", "blo
 [build-dependencies]
 cc = "1.2"
 pkg-config = "0.3"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.deb]
+maintainer = "fumoctl"
+section = "video"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/portal-screen-mirror", "usr/bin/", "755"],
+    ["assets/portal-screen-mirror.desktop", "usr/share/applications/", "644"],
+    ["assets/portal-screen-mirror.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/portal-screen-mirror", dest = "/usr/bin/portal-screen-mirror", mode = "755" },
+    { source = "assets/portal-screen-mirror.desktop", dest = "/usr/share/applications/portal-screen-mirror.desktop", mode = "644" },
+    { source = "assets/portal-screen-mirror.svg", dest = "/usr/share/icons/hicolor/scalable/apps/portal-screen-mirror.svg", mode = "644" },
+]

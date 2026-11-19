@@ -13,9 +13,11 @@ portal-screen-mirror/
 ├── flake.nix                       # Nix Flake: packages, apps, overlays, nixosModules, homeManagerModules, devShells
 ├── flake.lock                      # Locked nixpkgs input (keep synced with flake.nix edits)
 ├── .envrc                          # direnv `use flake` hook
-├── Cargo.toml                      # Rust dependencies & feature flags
+├── Cargo.toml                      # Rust dependencies, feature flags & deb/rpm/binstall metadata
 ├── Cargo.lock                      # Locked crate graph (required by rustPlatform.buildRustPackage)
 ├── build.rs                        # Probes pkg-config libs and compiles `src/pw_bridge.c` -> `libpw_bridge.a`
+├── .github/workflows/release.yml   # Multi-arch (`x86_64` + `aarch64`) AppImage, `.deb`, `.rpm` & tarball CI
+├── packaging/aur/PKGBUILD          # AUR `portal-screen-mirror-bin` package recipe
 ├── assets/
 │   ├── portal-screen-mirror.desktop # XDG desktop launcher entry (`Exec=portal-screen-mirror gui`)
 │   └── portal-screen-mirror.svg    # Scalable hicolor app icon
@@ -100,8 +102,9 @@ portal-screen-mirror/
 2. **Fixed utility viewport & persistent widget IDs (`src/gui.rs`)**:
    - Keep `min_inner_size == max_inner_size` (`[410.0, 565.0]`) and `.with_resizable(false)` on `ViewportBuilder`. Tiling Wayland compositors (`Umbriel`, `Hyprland`, `Sway`, `Niri`, `KWin`) use `min_size == max_size` to float the control panel automatically instead of tiling action buttons across the whole screen.
    - Custom interactive controls (`solid_action_button`) **must** use `ui.make_persistent_id(id_salt)` rather than positional `allocate_exact_size(..., Sense::click())` auto-IDs, and preserve `ignore_clicks_until` so status-banner transitions (`Waiting` → `Mirroring`) never replay stray pointer releases onto `Stop Mirroring`.
-3. **File-backed child `stderr` (never an unconsumed pipe)**:
+3. **File-backed child `stderr` & AppImage outer-path spawning**:
    - `launch_mode` redirects daemon `stderr` to `$XDG_RUNTIME_DIR/portal-screen-mirror.log` (`0600`) rather than `Stdio::piped()`, avoiding `EPIPE` or 64 KiB pipe deadlocks after the GUI closes.
+   - `launch_mode` checks `std::env::var_os("APPIMAGE")` before `std::env::current_exe()` so closing an AppImage GUI never unmounts the `/tmp/.mount_*` FUSE filesystem underneath a running background daemon.
 
 ---
 

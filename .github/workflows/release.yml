@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.appimage_arch }})
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            appimage_arch: x86_64
+          - runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            appimage_arch: aarch64
+
+    steps:
+      - name: Install system build dependencies (glibc 2.35 baseline)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl wget git file build-essential pkg-config clang rpm \
+            libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libegl-dev libgles-dev
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-deb and cargo-generate-rpm
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Compile release binary
+        run: |
+          cargo build --release --locked --target "${{ matrix.rust_target }}"
+          strip "target/${{ matrix.rust_target }}/release/portal-screen-mirror"
+          mkdir -p target/release dist
+          cp "target/${{ matrix.rust_target }}/release/portal-screen-mirror" target/release/portal-screen-mirror
+
+      - name: Package portable tarball
+        run: |
+          STAGE="portal-screen-mirror-${{ matrix.rust_target }}"
+          mkdir -p "$STAGE"
+          cp target/release/portal-screen-mirror "$STAGE/"
+          cp assets/portal-screen-mirror.desktop "$STAGE/"
+          cp assets/portal-screen-mirror.svg "$STAGE/"
+          cp LICENSE README.md "$STAGE/"
+          tar -czf "dist/${STAGE}.tar.gz" "$STAGE"
+
+      - name: Package .deb and .rpm
+        run: |
+          cargo deb --no-build --no-strip --target "${{ matrix.rust_target }}" -o dist/
+          cargo generate-rpm -o dist/
+
+      - name: Package AppImage
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/lib AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/portal-screen-mirror AppDir/usr/bin/portal-screen-mirror
+          chmod 0755 AppDir/usr/bin/portal-screen-mirror
+
+          # Bundle libxkbcommon only as a fallback at the end of LD_LIBRARY_PATH;
+          # host glibc, libEGL/libGLESv2, libwayland, and libpipewire-0.3 must come from the host.
+          cp -L /usr/lib/*-linux-gnu/libxkbcommon.so.0 AppDir/usr/lib/
+
+          cp assets/portal-screen-mirror.desktop AppDir/portal-screen-mirror.desktop
+          cp assets/portal-screen-mirror.desktop AppDir/usr/share/applications/portal-screen-mirror.desktop
+          cp assets/portal-screen-mirror.svg AppDir/portal-screen-mirror.svg
+          cp assets/portal-screen-mirror.svg AppDir/usr/share/icons/hicolor/scalable/apps/portal-screen-mirror.svg
+          ln -sf portal-screen-mirror.svg AppDir/.DirIcon
+
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${HERE}/usr/lib"
+          exec "${HERE}/usr/bin/portal-screen-mirror" "$@"
+          EOF
+          chmod 0755 AppDir/AppRun
+
+          wget -qO appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.appimage_arch }}.AppImage"
+          chmod +x appimagetool
+          ARCH="${{ matrix.appimage_arch }}" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ./appimagetool AppDir "dist/portal-screen-mirror-${{ matrix.appimage_arch }}.AppImage"
+          chmod +x "dist/portal-screen-mirror-${{ matrix.appimage_arch }}.AppImage"
+
+          APPIMAGE_EXTRACT_AND_RUN=1 "./dist/portal-screen-mirror-${{ matrix.appimage_arch }}.AppImage" --version
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.appimage_arch }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release-assets
+        run: |
+          chmod +x *.AppImage
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

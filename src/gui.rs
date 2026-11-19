@@ -316,7 +316,14 @@ impl MirrorGuiApp {
 
         self.stop_active();
 
-        let exe = match std::env::current_exe() {
+        /* When running inside an AppImage, spawn the outer .AppImage rather than the
+         * temporary /tmp/.mount_* FUSE path so closing the GUI never unmounts the daemon. */
+        let exe = match std::env::var_os("APPIMAGE")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .ok_or(())
+            .or_else(|()| std::env::current_exe())
+        {
             Ok(p) => p,
             Err(e) => {
                 self.last_error = Some(format!("Cannot locate executable: {e}"));
