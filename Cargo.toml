@@ -33,7 +33,7 @@ pkg-fmt = "tgz"
 maintainer = "fumoctl"
 section = "video"
 priority = "optional"
-depends = "$auto"
+depends = "$auto, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0"
 assets = [
     ["target/release/portal-screen-mirror", "usr/bin/", "755"],
     ["assets/portal-screen-mirror.desktop", "usr/share/applications/", "644"],
@@ -46,3 +46,9 @@ assets = [
     { source = "assets/portal-screen-mirror.desktop", dest = "/usr/share/applications/portal-screen-mirror.desktop", mode = "644" },
     { source = "assets/portal-screen-mirror.svg", dest = "/usr/share/icons/hicolor/scalable/apps/portal-screen-mirror.svg", mode = "644" },
 ]
+
+[package.metadata.generate-rpm.requires]
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-cursor.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"

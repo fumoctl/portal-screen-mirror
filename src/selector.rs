@@ -10,6 +10,7 @@ use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::{
     wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1,
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, Layer},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity},
@@ -182,6 +183,7 @@ struct SelState {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     cursor_mgr: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     cursor_dev: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    xdg_mgr: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
 
     wl_outputs: Vec<(wl_output::WlOutput, String)>,
     overlays: Vec<OverlaySurface>,
@@ -318,12 +320,46 @@ impl Dispatch<wl_registry::WlRegistry, ()> for SelState {
                 "wp_cursor_shape_manager_v1" => {
                     state.cursor_mgr = Some(registry.bind(name, version.min(1), qh, ()));
                 }
+                "zxdg_output_manager_v1" => {
+                    state.xdg_mgr = Some(registry.bind(name, version.min(3), qh, ()));
+                }
                 "wl_output" if version >= 2 => {
                     let idx = state.wl_outputs.len();
                     let wl = registry.bind(name, version.min(4), qh, idx);
                     state.wl_outputs.push((wl, String::new()));
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for SelState {
+    fn event(
+        _: &mut Self,
+        _: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        _: zxdg_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for SelState {
+    fn event(
+        state: &mut Self,
+        _: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_output_v1::Event::Name { name } = event {
+            if let Some(entry) = state.wl_outputs.get_mut(*idx) {
+                if entry.1.is_empty() {
+                    entry.1 = name;
+                }
             }
         }
     }
@@ -625,6 +661,7 @@ fn run_native_selector(outputs: &[OutputInfo]) -> Result<Option<RegionRect>, Str
         keyboard: None,
         cursor_mgr: None,
         cursor_dev: None,
+        xdg_mgr: None,
         wl_outputs: Vec::new(),
         overlays: Vec::new(),
         active_surface_idx: None,
@@ -638,7 +675,27 @@ fn run_native_selector(outputs: &[OutputInfo]) -> Result<Option<RegionRect>, Str
 
     conn.display().get_registry(&qh, ());
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+
+    let mut xdg_outs = Vec::new();
+    if let Some(ref xdg_mgr) = state.xdg_mgr {
+        for (idx, (wl, _)) in state.wl_outputs.iter().enumerate() {
+            xdg_outs.push(xdg_mgr.get_xdg_output(wl, &qh, idx));
+        }
+    }
+
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+
+    for xdg in xdg_outs {
+        xdg.destroy();
+    }
+    if let Some(xdg_mgr) = state.xdg_mgr.take() {
+        xdg_mgr.destroy();
+    }
+    for (idx, entry) in state.wl_outputs.iter_mut().enumerate() {
+        if entry.1.is_empty() {
+            entry.1 = format!("WL-{idx}");
+        }
+    }
 
     let (Some(comp), Some(_shm), Some(ls)) = (
         state.compositor.clone(),

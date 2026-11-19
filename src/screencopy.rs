@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
@@ -134,6 +135,7 @@ struct ScState {
     shm: Option<wl_shm::WlShm>,
     mgr: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
     mgr_ver: u32,
+    xdg_mgr: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     outputs: Vec<(u32, wl_output::WlOutput, String)>,
 
     target_name: String,
@@ -174,6 +176,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ScState {
                     state.mgr_ver = ver;
                     state.mgr = Some(registry.bind(name, ver, qh, ()));
                 }
+                "zxdg_output_manager_v1" => {
+                    state.xdg_mgr = Some(registry.bind(name, version.min(3), qh, ()));
+                }
                 "wl_output" if version >= 2 => {
                     let idx = state.outputs.len();
                     let wl = registry.bind(name, version.min(4), qh, idx);
@@ -187,6 +192,37 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ScState {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for ScState {
+    fn event(
+        _: &mut Self,
+        _: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        _: zxdg_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for ScState {
+    fn event(
+        state: &mut Self,
+        _: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_output_v1::Event::Name { name } = event {
+            if let Some(entry) = state.outputs.get_mut(*idx) {
+                if entry.2.is_empty() {
+                    entry.2 = name;
+                }
+            }
         }
     }
 }
@@ -382,6 +418,7 @@ impl WlrScreencopyRegion {
             shm: None,
             mgr: None,
             mgr_ver: 0,
+            xdg_mgr: None,
             outputs: Vec::new(),
             target_name: source_output.name.clone(),
             target_global: None,
@@ -404,7 +441,26 @@ impl WlrScreencopyRegion {
             return Ok(None);
         }
 
+        let mut xdg_outs = Vec::new();
+        if let Some(ref xdg_mgr) = state.xdg_mgr {
+            for (idx, (_, wl, _)) in state.outputs.iter().enumerate() {
+                xdg_outs.push(xdg_mgr.get_xdg_output(wl, &qh, idx));
+            }
+        }
+
         queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+
+        for xdg in xdg_outs {
+            xdg.destroy();
+        }
+        if let Some(xdg_mgr) = state.xdg_mgr.take() {
+            xdg_mgr.destroy();
+        }
+        for (idx, entry) in state.outputs.iter_mut().enumerate() {
+            if entry.2.is_empty() {
+                entry.2 = format!("WL-{idx}");
+            }
+        }
 
         let Some((global_id, target_wl, _)) = state
             .outputs

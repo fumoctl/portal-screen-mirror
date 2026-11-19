@@ -6,6 +6,7 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, Layer},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity},
@@ -14,8 +15,11 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 struct BoundOutput {
     global_name: u32,
     wl: wl_output::WlOutput,
+    xdg: Option<zxdg_output_v1::ZxdgOutputV1>,
     name: String,
     scale: i32,
+    logical_w: i32,
+    logical_h: i32,
     phys_w: i32,
     phys_h: i32,
 }
@@ -24,6 +28,7 @@ struct DisplayState {
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
+    xdg_output_mgr: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     outputs: Vec<BoundOutput>,
 
     target_name: String,
@@ -62,14 +67,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for DisplayState {
                 "xdg_wm_base" => {
                     state.xdg_wm_base = Some(registry.bind(name, version.min(5), qh, ()));
                 }
+                "zxdg_output_manager_v1" => {
+                    state.xdg_output_mgr = Some(registry.bind(name, version.min(3), qh, ()));
+                }
                 "wl_output" if version >= 2 => {
                     let idx = state.outputs.len();
                     let wl = registry.bind(name, version.min(4), qh, idx);
                     state.outputs.push(BoundOutput {
                         global_name: name,
                         wl,
+                        xdg: None,
                         name: String::new(),
                         scale: 1,
+                        logical_w: 0,
+                        logical_h: 0,
                         phys_w: 1920,
                         phys_h: 1080,
                     });
@@ -131,6 +142,45 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for DisplayState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for DisplayState {
+    fn event(
+        _: &mut Self,
+        _: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        _: zxdg_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for DisplayState {
+    fn event(
+        state: &mut Self,
+        _: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(out) = state.outputs.get_mut(*idx) else {
+            return;
+        };
+        match event {
+            zxdg_output_v1::Event::Name { name } => {
+                if out.name.is_empty() {
+                    out.name = name;
+                }
+            }
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                out.logical_w = width;
+                out.logical_h = height;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -301,6 +351,7 @@ impl PresentationWindow {
             compositor: None,
             layer_shell: None,
             xdg_wm_base: None,
+            xdg_output_mgr: None,
             outputs: Vec::new(),
             target_name: target_connector.to_string(),
             target_global_name: None,
@@ -317,9 +368,28 @@ impl PresentationWindow {
         queue
             .roundtrip(&mut state)
             .map_err(|e| format!("Wayland registry roundtrip failed: {e}"))?;
+
+        if let Some(ref mgr) = state.xdg_output_mgr {
+            for (idx, out) in state.outputs.iter_mut().enumerate() {
+                out.xdg = Some(mgr.get_xdg_output(&out.wl, &qh, idx));
+            }
+        }
+
         queue
             .roundtrip(&mut state)
             .map_err(|e| format!("Wayland output metadata roundtrip failed: {e}"))?;
+
+        for (idx, out) in state.outputs.iter_mut().enumerate() {
+            if let Some(xdg) = out.xdg.take() {
+                xdg.destroy();
+            }
+            if out.name.is_empty() {
+                out.name = format!("WL-{idx}");
+            }
+        }
+        if let Some(mgr) = state.xdg_output_mgr.take() {
+            mgr.destroy();
+        }
 
         let compositor = state
             .compositor
@@ -335,8 +405,16 @@ impl PresentationWindow {
         let target_wl = target.wl.clone();
         state.target_global_name = Some(target.global_name);
         state.target_scale = target.scale.max(1);
-        state.logical_w = (target.phys_w / state.target_scale).max(1);
-        state.logical_h = (target.phys_h / state.target_scale).max(1);
+        state.logical_w = if target.logical_w > 0 {
+            target.logical_w
+        } else {
+            (target.phys_w / state.target_scale).max(1)
+        };
+        state.logical_h = if target.logical_h > 0 {
+            target.logical_h
+        } else {
+            (target.phys_h / state.target_scale).max(1)
+        };
 
         let surface = compositor.create_surface(&qh, ());
         if Proxy::version(&surface) >= 3 {
