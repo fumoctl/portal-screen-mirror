@@ -34,7 +34,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl wget git file build-essential pkg-config clang rpm librsvg2-bin \
-            libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libegl-dev libgles-dev
+            pipewire-bin libpipewire-0.3-dev libpipewire-0.3-modules libspa-0.2-modules \
+            libwayland-dev libxkbcommon-dev xkb-data libx11-data libegl-dev libgles-dev
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -73,21 +74,31 @@ jobs:
 
       - name: Package AppImage
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/lib/fallback AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/lib/fallback AppDir/usr/share/X11 AppDir/usr/share/pipewire AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
           cp target/release/portal-screen-mirror AppDir/usr/bin/portal-screen-mirror
           chmod 0755 AppDir/usr/bin/portal-screen-mirror
 
-          # Fallback non-GPU userspace libs placed AFTER host library directories so host
-          # Mesa/NVIDIA/PipeWire/xkbcommon always take precedence when present, while minimal
-          # or nix-ld environments still work standalone.
-          cp -L \
-            /usr/lib/*-linux-gnu/libxkbcommon.so.0 \
-            /usr/lib/*-linux-gnu/libwayland-client.so.0 \
-            /usr/lib/*-linux-gnu/libwayland-cursor.so.0 \
-            /usr/lib/*-linux-gnu/libwayland-egl.so.1 \
-            /usr/lib/*-linux-gnu/libpipewire-0.3.so.0 \
-            AppDir/usr/lib/fallback/
+          # Fallback non-GPU userspace libs + neutral glvnd dispatchers placed AFTER host library
+          # directories so host Mesa/NVIDIA/PipeWire/xkbcommon always take precedence when present,
+          # while minimal or nix-ld environments still work standalone without appimage-run.
+          for lib in \
+            libdbus-1.so.3 \
+            libxkbcommon.so.0 \
+            libwayland-client.so.0 \
+            libwayland-cursor.so.0 \
+            libwayland-egl.so.1 \
+            libpipewire-0.3.so.0 \
+            libEGL.so.1 \
+            libGLESv2.so.2 \
+            libGLdispatch.so.0; do
+            found="$(find /lib /usr/lib -name "$lib" 2>/dev/null | head -n 1)"
+            cp -L "$found" AppDir/usr/lib/fallback/
+          done
           cp -rL /usr/lib/*-linux-gnu/spa-0.2 AppDir/usr/lib/fallback/spa-0.2
+          cp -rL /usr/lib/*-linux-gnu/pipewire-0.3 AppDir/usr/lib/fallback/pipewire-0.3
+          cp -L /usr/share/pipewire/client*.conf AppDir/usr/share/pipewire/
+          cp -rL /usr/share/X11/xkb AppDir/usr/share/X11/xkb
+          cp -rL /usr/share/X11/locale AppDir/usr/share/X11/locale
 
           cp assets/portal-screen-mirror.desktop AppDir/portal-screen-mirror.desktop
           cp assets/portal-screen-mirror.desktop AppDir/usr/share/applications/portal-screen-mirror.desktop
@@ -97,10 +108,46 @@ jobs:
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
-          HOST_LIBS="/run/opengl-driver/lib:/usr/lib64:/usr/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu"
-          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${HOST_LIBS}:${HERE}/usr/lib/fallback"
-          if [ -z "${SPA_PLUGIN_DIR:-}" ] && [ ! -d /usr/lib64/spa-0.2 ] && [ ! -d /usr/lib/spa-0.2 ] && [ ! -d /usr/lib/x86_64-linux-gnu/spa-0.2 ] && [ ! -d /usr/lib/aarch64-linux-gnu/spa-0.2 ]; then
-            export SPA_PLUGIN_DIR="${HERE}/usr/lib/fallback/spa-0.2"
+          CLEAN_LD=""
+          OLD_IFS="$IFS"
+          IFS=":"
+          for d in ${LD_LIBRARY_PATH:-}; do
+            case "$d" in
+              ""|/tmp/.mount_*|/tmp/appimage_extracted_*) ;;
+              *) CLEAN_LD="${CLEAN_LD:+$CLEAN_LD:}$d" ;;
+            esac
+          done
+          IFS="$OLD_IFS"
+          HOST_LIBS="${NIX_LD_LIBRARY_PATH:+$NIX_LD_LIBRARY_PATH:}/run/opengl-driver/lib:/usr/lib64:/usr/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu"
+          export LD_LIBRARY_PATH="${CLEAN_LD:+$CLEAN_LD:}${HOST_LIBS}:${HERE}/usr/lib/fallback"
+          if [ -z "${__EGL_VENDOR_LIBRARY_DIRS:-}" ] && [ -d /run/opengl-driver/share/glvnd/egl_vendor.d ] && [ ! -d /usr/share/glvnd/egl_vendor.d ]; then
+            export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
+          fi
+          case "${XKB_CONFIG_ROOT:-}" in ""|/tmp/.mount_*|/tmp/appimage_extracted_*)
+            [ ! -d /usr/share/X11/xkb ] && export XKB_CONFIG_ROOT="${HERE}/usr/share/X11/xkb"
+          ;; esac
+          case "${XLOCALEDIR:-}" in ""|/tmp/.mount_*|/tmp/appimage_extracted_*)
+            [ ! -d /usr/share/X11/locale ] && export XLOCALEDIR="${HERE}/usr/share/X11/locale"
+          ;; esac
+          has_host_pw=0
+          IFS=":"
+          for d in ${CLEAN_LD:+$CLEAN_LD:}${HOST_LIBS}; do
+            if [ -n "$d" ] && [ -e "$d/libpipewire-0.3.so.0" ]; then
+              has_host_pw=1
+              break
+            fi
+          done
+          IFS="$OLD_IFS"
+          if [ "$has_host_pw" -eq 0 ]; then
+            case "${SPA_PLUGIN_DIR:-}" in ""|/tmp/.mount_*|/tmp/appimage_extracted_*)
+              export SPA_PLUGIN_DIR="${HERE}/usr/lib/fallback/spa-0.2"
+            ;; esac
+            case "${PIPEWIRE_MODULE_DIR:-}" in ""|/tmp/.mount_*|/tmp/appimage_extracted_*)
+              export PIPEWIRE_MODULE_DIR="${HERE}/usr/lib/fallback/pipewire-0.3"
+            ;; esac
+            case "${PIPEWIRE_CONFIG_DIR:-}" in ""|/tmp/.mount_*|/tmp/appimage_extracted_*)
+              export PIPEWIRE_CONFIG_DIR="${HERE}/usr/share/pipewire"
+            ;; esac
           fi
           exec "${HERE}/usr/bin/portal-screen-mirror" "$@"
           EOF

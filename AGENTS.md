@@ -104,7 +104,7 @@ portal-screen-mirror/
    - Custom interactive controls (`solid_action_button`) **must** use `ui.make_persistent_id(id_salt)` rather than positional `allocate_exact_size(..., Sense::click())` auto-IDs, and preserve `ignore_clicks_until` so status-banner transitions (`Waiting` → `Mirroring`) never replay stray pointer releases onto `Stop Mirroring`.
 3. **File-backed child `stderr` & AppImage outer-path spawning**:
    - `launch_mode` redirects daemon `stderr` to `$XDG_RUNTIME_DIR/portal-screen-mirror.log` (`0600`) rather than `Stdio::piped()`, avoiding `EPIPE` or 64 KiB pipe deadlocks after the GUI closes.
-   - `launch_mode` checks `std::env::var_os("APPIMAGE")` before `std::env::current_exe()` so closing an AppImage GUI never unmounts the `/tmp/.mount_*` FUSE filesystem underneath a running background daemon.
+   - `resolve_daemon_exe` switches to outer `$APPIMAGE` **only** when `std::env::current_exe()` lives inside a transient mount (`/tmp/.mount_*` or `/tmp/appimage_extracted_*`, passing `APPIMAGE_EXTRACT_AND_RUN=1` when extracted or FUSE-less). Persistent unpack wrappers like NixOS `appimage-run` (`~/.cache/appimage-run/<sha256>/...` inside a `bwrap` namespace without `fusermount`) spawn `current_exe()` directly.
 
 ---
 

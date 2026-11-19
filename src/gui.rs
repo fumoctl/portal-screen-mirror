@@ -150,6 +150,41 @@ fn daemon_log_path() -> PathBuf {
     ipc::socket_path().with_extension("log")
 }
 
+fn has_fusermount() -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        for bin in ["fusermount3", "fusermount"] {
+            let cand = dir.join(bin);
+            if cand.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn resolve_daemon_exe() -> Result<(PathBuf, bool), String> {
+    let cur = std::env::current_exe().map_err(|e| format!("Cannot locate executable: {e}"))?;
+    let cur_str = cur.to_string_lossy();
+    /* Only switch to outer $APPIMAGE when running from a transient FUSE/extract mount
+     * (`/tmp/.mount_*` or `/tmp/appimage_extracted_*`). Wrappers like NixOS `appimage-run`
+     * unpack into persistent `~/.cache/appimage-run/<sha256>/` inside a bwrap sandbox that
+     * lacks `fusermount`, where re-executing `$APPIMAGE` would fail FUSE mount. */
+    let in_fuse_mount = cur_str.starts_with("/tmp/.mount_");
+    let in_extract_mount = cur_str.starts_with("/tmp/appimage_extracted_");
+    if in_fuse_mount || in_extract_mount {
+        if let Some(outer) = std::env::var_os("APPIMAGE")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+        {
+            return Ok((outer, in_extract_mount || !has_fusermount()));
+        }
+    }
+    Ok((cur, false))
+}
+
 struct MirrorGuiApp {
     outputs: Vec<OutputInfo>,
     selected_output: String,
@@ -316,17 +351,10 @@ impl MirrorGuiApp {
 
         self.stop_active();
 
-        /* When running inside an AppImage, spawn the outer .AppImage rather than the
-         * temporary /tmp/.mount_* FUSE path so closing the GUI never unmounts the daemon. */
-        let exe = match std::env::var_os("APPIMAGE")
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-            .ok_or(())
-            .or_else(|()| std::env::current_exe())
-        {
-            Ok(p) => p,
+        let (exe, force_extract) = match resolve_daemon_exe() {
+            Ok(v) => v,
             Err(e) => {
-                self.last_error = Some(format!("Cannot locate executable: {e}"));
+                self.last_error = Some(e);
                 return;
             }
         };
@@ -351,6 +379,9 @@ impl MirrorGuiApp {
             .unwrap_or_else(|_| Stdio::null());
 
         let mut cmd = Command::new(exe);
+        if force_extract {
+            cmd.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+        }
         cmd.arg(subcmd)
             .arg("--to")
             .arg(&self.selected_output)
