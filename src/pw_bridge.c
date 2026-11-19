@@ -5,8 +5,12 @@
 #include <fcntl.h>
 #include <pipewire/pipewire.h>
 #include <pthread.h>
+#include <spa/buffer/buffer.h>
 #include <spa/buffer/meta.h>
+#include <spa/param/param.h>
+#if defined(__has_include) && __has_include(<spa/param/buffers.h>)
 #include <spa/param/buffers.h>
+#endif
 #include <spa/param/format-utils.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/pod/builder.h>
@@ -22,6 +26,16 @@
 #define DRM_FORMAT_XRGB8888 0x34325258u
 #define DRM_FORMAT_ABGR8888 0x34324241u
 #define DRM_FORMAT_XBGR8888 0x34324258u
+#endif
+
+/* PipeWire < 0.3.60 (e.g. Ubuntu 22.04 baseline) predates SPA_META_VideoTransform in headers */
+#if !PW_CHECK_VERSION(0, 3, 60)
+#define SPA_META_VideoTransform 8u
+#define SPA_META_TRANSFORMATION_Flipped 4u
+#define SPA_META_TRANSFORMATION_Flipped180 6u
+struct spa_meta_videotransform {
+    uint32_t transform;
+};
 #endif
 
 struct ShmSlot {

@@ -33,7 +33,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl wget git file build-essential pkg-config clang rpm \
+            ca-certificates curl wget git file build-essential pkg-config clang rpm librsvg2-bin \
             libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libegl-dev libgles-dev
 
       - name: Checkout repository
@@ -73,24 +73,35 @@ jobs:
 
       - name: Package AppImage
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/lib AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/lib/fallback AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
           cp target/release/portal-screen-mirror AppDir/usr/bin/portal-screen-mirror
           chmod 0755 AppDir/usr/bin/portal-screen-mirror
 
-          # Bundle libxkbcommon only as a fallback at the end of LD_LIBRARY_PATH;
-          # host glibc, libEGL/libGLESv2, libwayland, and libpipewire-0.3 must come from the host.
-          cp -L /usr/lib/*-linux-gnu/libxkbcommon.so.0 AppDir/usr/lib/
+          # Fallback non-GPU userspace libs placed AFTER host library directories so host
+          # Mesa/NVIDIA/PipeWire/xkbcommon always take precedence when present, while minimal
+          # or nix-ld environments still work standalone.
+          cp -L \
+            /usr/lib/*-linux-gnu/libxkbcommon.so.0 \
+            /usr/lib/*-linux-gnu/libwayland-client.so.0 \
+            /usr/lib/*-linux-gnu/libwayland-cursor.so.0 \
+            /usr/lib/*-linux-gnu/libwayland-egl.so.1 \
+            /usr/lib/*-linux-gnu/libpipewire-0.3.so.0 \
+            AppDir/usr/lib/fallback/
+          cp -rL /usr/lib/*-linux-gnu/spa-0.2 AppDir/usr/lib/fallback/spa-0.2
 
           cp assets/portal-screen-mirror.desktop AppDir/portal-screen-mirror.desktop
           cp assets/portal-screen-mirror.desktop AppDir/usr/share/applications/portal-screen-mirror.desktop
-          cp assets/portal-screen-mirror.svg AppDir/portal-screen-mirror.svg
           cp assets/portal-screen-mirror.svg AppDir/usr/share/icons/hicolor/scalable/apps/portal-screen-mirror.svg
-          ln -sf portal-screen-mirror.svg AppDir/.DirIcon
+          rsvg-convert -w 256 -h 256 assets/portal-screen-mirror.svg -o AppDir/portal-screen-mirror.png
 
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
-          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${HERE}/usr/lib"
+          HOST_LIBS="/run/opengl-driver/lib:/usr/lib64:/usr/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${HOST_LIBS}:${HERE}/usr/lib/fallback"
+          if [ -z "${SPA_PLUGIN_DIR:-}" ] && [ ! -d /usr/lib64/spa-0.2 ] && [ ! -d /usr/lib/spa-0.2 ] && [ ! -d /usr/lib/x86_64-linux-gnu/spa-0.2 ] && [ ! -d /usr/lib/aarch64-linux-gnu/spa-0.2 ]; then
+            export SPA_PLUGIN_DIR="${HERE}/usr/lib/fallback/spa-0.2"
+          fi
           exec "${HERE}/usr/bin/portal-screen-mirror" "$@"
           EOF
           chmod 0755 AppDir/AppRun
